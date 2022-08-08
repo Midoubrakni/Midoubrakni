@@ -1,0 +1,145 @@
+<#	
+	.Note
+	================================================= =========================
+	 Nom de fichier : Expiration Mot de passe.ps1
+	================================================= =========================
+	.LA DESCRIPTION
+	tâche planifiée qui rassemblera tous les utilisateurs dont les mots de passe expirent dans moins de 7 jours et les transmettra aux teams
+#>
+
+
+
+
+$SendMessage = $null
+#Obtener tous les utilisateurs dont le mot de passe expire dans X jours, cela définit les jours
+$LessThan = 7
+#Teams webhook URL
+$uri = "https://bizoffice103.webhook.office.com/webhookb2/7485b878-c676-"
+
+$PWExpiringTable = New-Object 'System.Collections.Generic.List[System.Object]'
+$ArrayTable = New-Object 'System.Collections.Generic.List[System.Object]'
+$ArrayTableExpired = New-Object 'System.Collections.Generic.List[System.Object]'
+
+$ExpiringUsers = 0
+$ExpiredUsers = 0
+
+$maxPasswordAge = ((Get-ADDefaultDomainPasswordPolicy).MaxPasswordAge).Days
+
+#Obtenez tous les utilisateurs et stockez-les dans une variable nommée $Users
+get-aduser -filter { (PasswordNeverExpires -eq $false) -and (enabled -eq $true) } -properties * | ForEach-Object{
+	Write-Host "Working on $($_.Name)" -ForegroundColor White
+	
+	
+	#Obtenir la date de la dernière définition du mot de passe
+	$passwordSetDate = ($_.PasswordLastSet)
+	
+	if ($null -eq $passwordSetDate)
+	{
+		#0x1 = Jamais connecté
+		$daystoexpire = "0x1"
+	}
+	
+	else
+	{
+		
+		#Vérifier les mots de passe
+		$PasswordPol = (Get-ADUserResultantPasswordPolicy -Identity $_.objectGUID -ErrorAction SilentlyContinue)
+		
+		if ($Null -ne ($PasswordPol))
+		{
+			
+			$maxPasswordAge = ($PasswordPol).MaxPasswordAge
+		}
+		
+		$expireson = $passwordsetdate.AddDays($maxPasswordAge)
+		$today = (Get-Date)
+		
+		#Obtient le nombre de jours avant l'expiration du mot de passe et le stocke dans le $daystoexpire 
+		$daystoexpire = (New-TimeSpan -Start $today -End $Expireson).Days
+		If ($daystoexpire -lt ($LessThan + 1))
+		{
+			write-host "$($_.Name) sera ajouté au tableau" -ForegroundColor red
+			If ($daystoexpire -lt 0)
+			{
+				#0x2 = Le mot de passe a expiré
+				$daystoexpire = "Le mot de passe est expiré"
+			}
+			$obj = [PSCustomObject]@{
+				
+				'Name' = $_.name
+				'DaysUntil' = $daystoexpire
+				'EmailAddress' = $_.emailaddress
+				'LastSet' = $_.PasswordLastSet.ToShortDateString()
+				'LockedOut' = $_.LockedOut
+				'UPN'  = $_.UserPrincipalName
+				'Enabled' = $_.Enabled
+				'Le mot de passe n expire jamais' = $_.PasswordNeverExpires
+			}
+			
+			$PWExpiringTable.Add($obj)
+		}
+		Else
+		{
+			write-host "$($_.Name)'le compte est conforme" -ForegroundColor Green
+		}
+	}
+}
+
+#Triez le tableau de sorte que le message Teams indique l'expiration du plus tôt au plus tard
+$PWExpiringTable = $PWExpiringTable | sort-Object DaysUntil
+
+$PWExpiringTable | ForEach-Object{
+	
+	If ($_.DaysUntil -eq "Le mot de passe est expiré")
+	{
+		write-host "$($_.name) Expire" -ForegroundColor DarkRed
+		$ExpiredUsers++
+		$SectionExpired = @{
+			activityTitle = "$($_.Name)"
+			activitySubtitle = "$($_.EmailAddress)"
+			activityText  = "$($_.Name)'le mot de passe a déjà expiré!"
+			activityImage = $ItemImage
+		}
+		$ArrayTableExpired.add($SectionExpired)
+	}
+	Else
+	{
+		write-host "$($_.name) expire" -ForegroundColor DarkYellow
+		$ExpiringUsers++
+		$Section = @{
+			activityTitle = "$($_.Name)"
+			activitySubtitle = "$($_.EmailAddress)"
+			activityText  = "$($_.Name) doit changer son mot de passe dans $($_.DaysUntil) jours"
+			activityImage = $ItemImage
+		}
+		
+		$ArrayTable.add($Section)
+		
+	}
+}
+
+
+Write-Host "Comptes expirés: $($($ExpiredUsers).count)" -ForegroundColor Yellow
+write-Host "Comptes expirés: $($($ExpiringUsers).count)" -ForegroundColor Yellow
+
+
+
+
+$body = ConvertTo-Json -Depth 8 @{
+	title = 'Utilisateurs dont le mot de passe expiré - Notification'
+	text  = "Il y a $($ArrayTable.Count) utilisateurs dont les mots de passe expirent dans $($LessThan) jours"
+	sections = $ArrayTable
+	
+}
+Write-Host "Envoi d'une notification aux utilisateurs expirants" -ForegroundColor Green
+Invoke-RestMethod -uri $uri -Method Post -body $body -ContentType 'application/json'
+
+
+$body2 = ConvertTo-Json -Depth 8 @{
+	title = 'Utilisateurs avec mot de passe expire - Notification'
+	text  = "Il y a $($ArrayTableExpired.Count) les utilisateurs dont les mots de passe ont déjà expiré"
+	sections = $ArrayTableExpired
+	
+}
+Write-Host "Envoi d'une notification aux utilisateurs expirés" -ForegroundColor Green
+Invoke-RestMethod -uri $uri -Method Post -body $body2 -ContentType 'application/json'
